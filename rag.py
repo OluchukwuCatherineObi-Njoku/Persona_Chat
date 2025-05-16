@@ -1,28 +1,14 @@
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-import subprocess
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.chains import ConversationalRetrievalChain
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
-from langchain_community.llms import Ollama
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_ollama import OllamaLLM
 from langchain.chains import RetrievalQA
 
 
-def run_ollama(prompt: str):
-
-    result = subprocess.run(
-        ["ollama", "run", "llama3.2"],
-        input=prompt,
-        text=True,
-        capture_output=True,
-        encoding="utf-8"
-    )
-    return result.stdout
 
 def build_persona_knowledge_base(path):
 
@@ -46,33 +32,28 @@ def build_persona_knowledge_base(path):
 
     retriever = persisted_vectorstore.as_retriever()
 
-    # model = SentenceTransformer('all-MiniLM-L6-v2')
-    # embeddings = model.encode([doc.page_content for doc in docs])
-
-    # index = faiss.IndexFlatL2(embeddings.shape[1])
-    # index.add(np.array(embeddings))
-
-    # return model, index, docs
-
     return retriever
 
-def attain_context(query, model, index, documents, k=3):
+def setupRAG(retriever):
 
-    query_embedding = model.encode([query])
-    distances, indices = index.search(query_embedding, k=k)
-    retrieved_docs = [documents[i].page_content for i in indices[0]]
+    llm = OllamaLLM(model="llama3.2") 
+    qa = RetrievalQA.from_chain_type(llm=llm, chain_type="stuff", retriever=retriever)
 
-    return " ".join(retrieved_docs)
+    return qa
 
 def create_prompt_template():
     
     return PromptTemplate(
-        input_variables=["context", "history", "query"],
+        input_variables=["history", "query"],
         template="""
-        You are a helpful chatbot. Use the following context to answer the user's question.
+        You are a the person described and written about in the context. 
+        Embody them and answer the user's question as though you are them. Embody the context's persona,
+        their mannerisms, and their way of thinking. Be them, and be so close that the user cannot tell the difference.
+        Remember that you are simulating a message chat, as though they are chatting on whatsapp or a similar app,
+        so adhere to the format of a message chat.
 
-        Context:
-        {context}
+        Answer the user's question based only on the provided context and conversation history.
+
 
         Conversation History:
         {history}
@@ -85,36 +66,35 @@ def create_prompt_template():
     )
 
 
-def chat_with_persona(user_query,model, index, documents, memory):
+def chat_with_persona(qa):
 
-    context = attain_context(user_query, model, index, documents)
+    memory = ConversationBufferMemory(memory_key="history", input_key="query", return_messages=True)
     history = memory.load_memory_variables({}).get("history", "")
-
     prompt_template = create_prompt_template()
-    prompt = prompt_template.format(context=context, history=history, query=user_query)
 
-    response = run_ollama(prompt)
+    user_query = ''
+    while "bye" not in user_query.lower():
 
-    memory.save_context({"query": user_query}, {"response": response})
+        user_query = input("You: ").strip()
+        user_query += "\n"
 
-    return response
+        prompt = prompt_template.format(history=history, query=user_query)
+
+        response = qa.run(prompt)
+        print(response + "\n")
+
+        memory.save_context({"query": user_query}, {"response": response})
+    
+    print("Goodbye! Let's continue our conversation later.")
+
 
 
 def main():
 
     folder_path = "persona_data\history.txt"
-    model, index, documents = build_persona_knowledge_base(folder_path)
-    memory = ConversationBufferMemory(memory_key="history", input_key="query")
-
-    print("Welcome! Type 'bye' when you would like to leave")
-    
-    while True:
-        user_query = input("You: ").strip()
-        if user_query.lower() == "bye":
-            break
-
-        response = chat_with_persona(user_query, model, index, documents, memory)
-        print(f"Chatbot: {response}")
+    retriever = build_persona_knowledge_base(folder_path)
+    qa = setupRAG(retriever)
+    chat_with_persona(qa)
 
 if __name__ == "__main__":
     main()
